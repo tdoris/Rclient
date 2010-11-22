@@ -1,0 +1,19 @@
+name:                rclient
+version:             0.1
+synopsis:            Haskell client for Rserve
+description:         Rserve is a TCP/IP server that allows other programs to use the facilities of R. This module is a Haskell client for Rserve.
+category:            Statistics
+license:             BSD3
+license-file:        LICENSE
+author:              Dubhrosa
+maintainer:          tdubhrosa@gmail.com
+build-depends:       base >= 3.0, 
+                     QuickCheck >= 2.4
+
+build-type:          Simple
+
+executable:          rclient
+main-is:             Main.hs
+other-modules:       Rclient
+ghc-options:         -Wall -O2
+
