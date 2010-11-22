@@ -8,6 +8,9 @@ license-file:        LICENSE
 author:              Dubhrosa
 maintainer:          tdubhrosa@gmail.com
 build-depends:       base >= 3.0, 
+                     network >= 2.3,
+                     binary >= 0.4.2,
+                     bytestring,
                      QuickCheck >= 2.4
 
 build-type:          Simple
