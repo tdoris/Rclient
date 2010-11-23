@@ -2,8 +2,8 @@ module Rclient where
 
 import Network
 import System.IO
-import Data.ByteString as B
-import Data.ByteString.Lazy.Char8 as BL
+import qualified Data.ByteString as B
+import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Binary
 import Data.Binary.Put
 
@@ -26,21 +26,29 @@ rConnection server port = do
   rTest h
   return (RConn h)
 
-cmdLogin = 1 
-cmdVoidEval = 2
-cmdEval = 3
+cmdLogin = 1 :: Word32
+cmdVoidEval = 2 :: Word32
+cmdEval = 3 :: Word32
 
 bin2BS :: Binary a => a -> BL.ByteString
-bin2BS x = runPut (put x)
+bin2BS = runPut . put 
 
-createMessage :: Int ->BL.ByteString -> BL.ByteString
-createMessage cmd content = BL.concat (bin2BS cmd : bin2BS (BL.length content - 16) : bin2BS dof : bin2BS res : [content])
-  where res = 0 :: Int
-        dof = 0 :: Int
+createMessage :: Word32 ->BL.ByteString -> BL.ByteString
+createMessage cmd content = BL.concat (runPut (putWord32le cmd) : runPut (putWord32le (fromIntegral(BL.length content + 1)::Word32)) : bin2BS dof : bin2BS res : content : [bin2BS nullt])
+  where res = 0 :: Word32
+        dof = 0 :: Word32
+        nullt = 0 :: Word32
 
 rTest :: Handle -> IO ()
 rTest h = do
-  BL.hPut h (createMessage cmdEval (BL.pack "1+1"))
-  response <- B.hGetLine h
-  B.putStrLn response
+  BL.hPut h (createMessage cmdLogin (BL.pack "1+1\n"))
+  suckit h
+  
+suckit :: Handle -> IO ()
+suckit h = do
+  r <- B.hGetLine h
+  putStrLn ("response length:" ++ show (B.length r))
+  B.putStrLn r
+  suckit h
+
    
