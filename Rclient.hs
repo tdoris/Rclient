@@ -12,6 +12,7 @@ import Data.Binary.IEEE754
 import Data.Char
 import Data.Bits
 import Control.Monad
+import Data.List.Split
 
 xt_INT = 1 :: Word8
 xt_DOUBLE = 2 :: Word8
@@ -59,10 +60,17 @@ instance Binary QAP1Message where
            content <- get
            return (QAP1Message header content)
 
+padRstring :: String -> String
+padRstring s = padded
+  where padded = nullTerminated ++ replicate gapLen '\1'
+        nullTerminated = s ++ "\0"
+        r = rem (length nullTerminated) 4
+        gapLen = if 4 - r == 0 then 0 else 4 - r 
+
 createMessage :: Word32 -> String -> QAP1Message
-createMessage cmdId content = QAP1Message (QAP1Header cmdId tlen 0 0) (DTString (content ++ padding))
-  where tlen = fromIntegral(length (content++padding) + 4):: Word32
-        padding = replicate (max 1 (rem (length content) 4)) '\0'
+createMessage cmdId content = QAP1Message (QAP1Header cmdId tlen 0 0) (DTString padded)
+  where tlen = fromIntegral(length padded + 4):: Word32
+        padded = padRstring content
 
 dt_int        = 1  
 dt_char       = 2  
@@ -100,7 +108,6 @@ instance Binary DT where
                        e <- get
                        return (DTSexp e)
 
-               
 data RSEXP = RInt Int | RDouble Double | RString String | RSym String | RBool Bool 
   | RVector [RSEXP] 
   | RList RSEXP -- head, tag and tail
@@ -131,10 +138,15 @@ instance Binary RSEXP where
   put (RSym s) = do putWord8 xt_SYM >> put len24 >> mapM_ put s 
                     where len24 = to24bit (length s )
   put (RBool b) = do putWord8 xt_BOOL >> putWord8 0 >> putWord8 0 >> putWord8 0 >> putWord8 (if b then 1 else 0)
-
+  put (RArrayString ss) = do putWord8 xt_ARRAY_STR >> put len24 >> mapM_ putSingleString ss
+                             where len24 = to24bit (sum (map (2+) (map length ss)))
+                                   putSingleString s = mapM_ (putWord8 . BI.c2w) (padRstring s)
   put _ = error "unknown type in put Binary instance RSEXP"
   get = do t <- getWord8 
-           case fromIntegral(t)::Int of 
+           let hasAttribute = t .&. 128 == 128
+           let isLarge = t .&. 64 == 64
+           let typeCode = t .&. 63
+           case fromIntegral(typeCode)::Int of 
              1  -> do sequence_ (replicate 3 getWord8) 
                       e <- get
                       return (RInt e)
@@ -152,12 +164,44 @@ instance Binary RSEXP where
              6  -> do sequence_ (replicate 3 getWord8)
                       b <- getWord8
                       return (RBool (b == 1))  -- 1=TRUE, 0=FALSE, 2=NA
+             16 -> do len24 <- get
+                      let len = from24Bit len24
+                      rsexpsBytes <- sequence (replicate len getWord8)
+                      let rsexps = vectorRSEXPDecode rsexpsBytes
+                      return (RVector rsexps)
+             32 -> do len24 <- get
+                      let len = (from24Bit len24) `div` 4
+                      ints <- sequence (replicate len getWord32le)
+                      return (RArrayInt (map fromIntegral ints))
              33 -> do len24 <- get
                       let len = (from24Bit len24) `div` 8
                       doubles <- sequence (replicate len getFloat64le)
                       return (RArrayDouble doubles)
+             34 -> do len24 <- get  
+                      let len = (from24Bit len24) 
+                      stringsBytes <- sequence (replicate len getWord8)
+                      let strings = vectorStringDecode (map BI.w2c stringsBytes)
+                      return (RArrayString strings)
+             36 -> do len24 <- get
+                      boolCount <-getWord32le
+                      let len = from24Bit len24
+                      bools <- sequence (replicate ((fromIntegral boolCount)::Int) getWord8)
+                      return (RArrayBool (map (==1) bools))
              _  -> error ("unsuppported RSEXP type code:"++show (fromIntegral(t)::Int))
-        
+       
+vectorRSEXPDecode :: [Word8] -> [RSEXP]
+vectorRSEXPDecode [] = []
+vectorRSEXPDecode ws = val : vectorRSEXPDecode (drop (fromIntegral(BL.length (encode val))::Int) ws)
+  where content = BL.pack (map BI.w2c ws)
+        val = vectorRSEXPDecode1 content
+
+vectorRSEXPDecode1 :: BL.ByteString -> RSEXP
+vectorRSEXPDecode1 content = decode content
+ 
+vectorStringDecode :: String -> [String]
+vectorStringDecode s = filter (/="") $ map (dropWhile (=='\1')) (splitOn "\0" s)
+
+
 data RList a = RListNil | RListCons a a (RList a)
 
 to24bit :: Int -> Len24
