@@ -43,7 +43,7 @@ padRstring s = padded
   where padded = nullTerminated ++ replicate gapLen '\1'
         nullTerminated = s ++ "\0"
         r = rem (length nullTerminated) 4
-        gapLen = if 4 - r == 0 then 0 else 4 - r 
+        gapLen = if r == 0 then 0 else 4 - r 
 
 depadRstring :: String -> String
 depadRstring s = takeWhile (/= '\0') s
@@ -196,7 +196,7 @@ instance Binary RSEXP where
                        where len24 = 4+sum (map encodedLength v) 
   put (RSEXPWithAttrib attrib val) = do putWord8 (fromIntegral code) >> put len24 >> put attrib >> mapM_ (putWord8 . BI.c2w) (BL.unpack (BL.drop 4 (encode val)))
                                    where code = getTypeCode val .|. xt_HAS_ATTR 
-                                         len24 = (encodedLength attrib + encodedLength val)
+                                         len24 = to24bit (encodedLength attrib + encodedLength val)
    
   put _ = error "unknown type in put Binary instance RSEXP"
   get = do t <- getWord8 
@@ -204,7 +204,6 @@ instance Binary RSEXP where
            let len = from24Bit len24
            let typeCode = getCode t
            case typeCode of 
-                 -- if we have an attribute attached, we have to parse the attribute and use the first type code to parse the RSEXP data 
                  (RTypeAttr x) -> do attrib <- get -- parse the attribute RSEXP
                                      let remainingLen = len - (fromIntegral(BL.length (encode attrib))::Int) 
                                      val <- getRType (RType x) remainingLen
