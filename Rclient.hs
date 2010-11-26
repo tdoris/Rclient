@@ -15,7 +15,6 @@ import Control.Monad
 import Data.List
 import Data.List.Split
 
-
 cmdLogin = 1 :: Word32
 cmdVoidEval = 2 :: Word32
 cmdEval = 3 :: Word32
@@ -40,10 +39,13 @@ instance Binary QAP1Message where
 
 padRstring :: String -> String
 padRstring s = padded
-  where padded = nullTerminated ++ replicate gapLen '\1'
+  where padded = nullTerminated ++ replicate (gapLen r) '\1'
         nullTerminated = s ++ "\0"
-        r = rem (length nullTerminated) 4
-        gapLen = if r == 0 then 0 else 4 - r 
+        r = (length nullTerminated)
+
+gapLen :: Int -> Int
+gapLen r = if gap == 0 then 0 else 4 - gap 
+  where gap = rem r 4
 
 depadRstring :: String -> String
 depadRstring = takeWhile (/= '\0') 
@@ -69,7 +71,7 @@ instance Binary DT where
   put (DTInt i) = putWord8 dtInt >> put (to24bit 0) >> putWord32le (fromIntegral i::Word32)
   put (DTChar c) = putWord8 dtChar >> put (to24bit 0)>> putWord8 (BI.c2w c)
   put (DTDouble d) = putWord8 dtDouble >> put (to24bit 0) >> putFloat64le d
-  put (DTString s) = putWord8 dtString >> put (to24bit 0) >> mapM_ put s 
+  put (DTString s) = putWord8 dtString >> put len24 >> mapM_ put s 
                         where len24 = to24bit (length s)
   put (DTBytestream s)= putWord8 dtBytestream >> put len24 >> mapM_ putWord8 s
                           where len24 = to24bit (length s)
@@ -85,30 +87,33 @@ instance Binary DT where
                       return (DTString (map BI.w2c chars))
               5 -> do len24 <- get
                       let len = (from24Bit len24)
-                      words <- replicateM len getWord8
-                      return (DTBytestream words)
+                      ws <- replicateM len getWord8
+                      return (DTBytestream ws)
               10 -> do replicateM_ 3 getWord8
                        liftM DTSexp get
 
-data RSEXP = RInt Int 
+data RSEXP = 
+   RNULL
+  | RInt Int 
   | RDouble Double 
   | RString String 
   | RSym String 
   | RBool Bool 
   | RVector [RSEXP] 
   | RList RSEXP RSEXP RSEXP -- head vals tag
-  | RClos Int  -- just store the length 
+  | RClos Word32  -- just store the length 
   | RListTag [(RSEXP,RSEXP)]
   | RArrayInt [Int]
   | RArrayDouble [Double]
   | RArrayString [String]
   | RArrayBool [Bool]
-  | RRaw [Word8]
   | RArrayComplex [(Double, Double)]
   | RSEXPWithAttrib RSEXP RSEXP
-  deriving (Show)
+  | RUnknown Word32
+  deriving (Show,Eq)
 
 getTypeCode :: RSEXP -> Word8
+getTypeCode (RNULL)       = xtNull
 getTypeCode (RInt _)        = xtInt
 getTypeCode (RDouble _)     = xtDouble
 getTypeCode (RString _)     = xtStr
@@ -123,9 +128,10 @@ getTypeCode (RArrayDouble _)= xtArrayDouble
 getTypeCode (RArrayString _)= xtArrayStr
 getTypeCode (RArrayBool _)  = xtArrayBool
 getTypeCode (RArrayComplex _) = xtArrayCplx
-getTypeCode (RRaw _)        = xtRaw
- 
+getTypeCode (RSEXPWithAttrib _ v) = xtHasAttr .|. getTypeCode v
+getTypeCode (RUnknown v) = xtUnknown 
 
+xtNull = 0 :: Word8 
 xtInt = 1 :: Word8
 xtDouble = 2 :: Word8
 xtStr = 3 :: Word8
@@ -145,11 +151,12 @@ xtArrayInt = 32 :: Word8
 xtArrayDouble = 33 :: Word8
 xtArrayStr = 34 ::Word8
 xtArrayBool = 36 ::Word8
-xtRaw = 37 :: Word8
 xtArrayCplx = 38 :: Word8
 xtHasAttr = 128 :: Word8
+xtUnknown = 48 ::Word8
 
-data Len24 = Len24 Word8 Word8 Word8
+data Len24 = Len24 Word8 Word8 Word8 deriving Show
+
 instance Binary Len24 where
   put (Len24 l1 l2 l3) = putWord8 l1 >> putWord8 l2 >> putWord8 l3
   get = do l1 <- getWord8
@@ -160,15 +167,16 @@ instance Binary Len24 where
 data RTypeCode = RType Word8 | RTypeAttr Word8 deriving Show
 
 getCode :: Word8 -> RTypeCode 
-getCode t = if hasAttribute then RTypeAttr code else RType code
+getCode t = if isLarge then error "LARGE" else (if hasAttribute then RTypeAttr code else RType code)
   where hasAttribute = t .&. 128 == 128 
         isLarge = t .&. 64 == 64
         code =  t .&. 63
 
 instance Binary RSEXP where
-  put (RInt i) = putWord8 xtInt >> put (to24bit 0) >> putWord32le (fromIntegral i :: Word32)
-  put (RDouble d) = putWord8 xtDouble >> put (to24bit 0) >> putFloat64le d
-  put (RBool b) = putWord8 xtBool >> put (to24bit 0) >> putWord8 (if b then 1 else 0)
+  put (RNULL) = putWord8 xtNull >> put (to24bit 0) 
+  put (RInt i) = putWord8 xtInt >> put (to24bit 4) >> putWord32le (fromIntegral i :: Word32)
+  put (RDouble d) = putWord8 xtDouble >> put (to24bit 8) >> putFloat64le d
+  put (RBool b) = putWord8 xtBool >> put (to24bit 4) >> putWord8 (if b then 1 else 0) >> replicateM_ 3 (putWord8 0)
   put (RString s) = putWord8 xtStr >> put len24 >> mapM_ (putWord8 . BI.c2w) ps
                     where len24 = to24bit (length ps)
                           ps = padRstring s
@@ -179,57 +187,68 @@ instance Binary RSEXP where
                               where len24 = to24bit (4* length arr)
   put (RArrayDouble arr) = putWord8 xtArrayDouble >> put len24  >> mapM_ putFloat64le arr
                               where len24 = to24bit (length arr *8)
-  put (RArrayBool arr) = putWord8 xtArrayBool >> put len24  >> mapM_ (putWord8 . (\x -> if x then 1 else 0)) arr
-                              where len24 = to24bit (length arr)
+  put (RArrayBool arr) = putWord8 xtArrayBool >> put len24  >> putWord32le (fromIntegral (length arr) :: Word32) >> mapM_ (putWord8 . (\x -> if x then 1 else 0)) arr >> replicateM_ (gapLen (length arr)) (putWord8 255)
+                              where len24 = to24bit (4 + length arr + gapLen (length arr))
+                                    
   put (RArrayString ss) = putWord8 xtArrayStr >> put len24 >> mapM_ (putWord8 . BI.c2w) ss'
                              where len24 = to24bit (length ss')
-                                   ss' = padRstring (intercalate "\0" ss)
+                                   ss' = if length ss > 0  then padRstring (intercalate "\0" ss) else [] 
   put (RListTag lt) = putWord8 xtListTag >> put len24 >> mapM_ put lt
                          where len24 = to24bit (sum (map encodedLength rsexps))
                                rsexps = detuple lt
-  put (RClos len) = putWord8 xtClos >> put (to24bit len) >> replicateM_ len (putWord8 0)
+  put (RClos v) = putWord8 xtClos >> put (to24bit 4) >> putWord32le v 
   put (RList h vals tag) = putWord8 xtList >> put len24 >> put h >> put vals >> put tag
                      where len24 = to24bit (encodedLength h + encodedLength vals + encodedLength tag)
   put (RVector v) = putWord8 xtVector  >> put len24 >> mapM_ put v
-                       where len24 = to24bit (4 + sum (map encodedLength v))
+                       where len24 = to24bit (sum (map encodedLength v))
   put (RSEXPWithAttrib attrib val) = putWord8 (fromIntegral code) >> put len24 >> put attrib >> mapM_ (putWord8 . BI.c2w) (BL.unpack (BL.drop 4 (encode val)))
                                    where code = getTypeCode val .|. xtHasAttr 
-                                         len24 = to24bit (encodedLength attrib + encodedLength val) 
-  put _ = error "unknown type in put Binary instance RSEXP"
+                                         len24 = to24bit (encodedLength attrib + encodedLength val - 4) 
+  put (RArrayComplex cs) = putWord8 xtArrayCplx >> put len24 >> mapM_ putFloat64le (detuple cs)
+                           where len24 = to24bit (16 * length cs)
+  put (RUnknown v) = putWord8 xtUnknown >> put (to24bit 4) >> putWord32le v
+--  put _ = error "unknown type in put Binary instance RSEXP"
   get = do t <- getWord8 
            len24 <- get
            let len = from24Bit len24
            let typeCode = getCode t
            case typeCode of 
-                 (RTypeAttr x) -> do attrib <- get -- parse the attribute RSEXP
-                                     let remainingLen = len - (fromIntegral(BL.length (encode attrib))::Int) 
+                 (RTypeAttr x) -> do attribType <- getWord8
+                                     attribLen24 <- get
+                                     let lenAttrib = from24Bit attribLen24
+                                     let attribTypeCode = getCode attribType
+                                     attrib <- getRType attribTypeCode lenAttrib
+                                     let remainingLen = len - lenAttrib - 4
                                      val <- getRType (RType x) remainingLen
                                      return (RSEXPWithAttrib attrib val)
-                 (RType x) -> getRType typeCode len
+                 (RType _) -> getRType typeCode len
 
 getRType :: RTypeCode -> Int -> Get RSEXP
 getRType typeCode len = 
           case typeCode of
-                 (RType 1)  -> do e <- get
-                                  return (RInt e)
-                 (RType 2)  -> do e <- get
+                 (RType 0)  -> do return RNULL
+                 (RType 1)  -> do e <- getWord32le
+                                  return (RInt (fromIntegral e))
+                 (RType 2)  -> do e <- getFloat64le
                                   return (RDouble e)
-                 (RType 3)  -> do chars <- replicateM (len-1) getWord8
+                 (RType 3)  -> do chars <- replicateM len getWord8
                                   return (RString (depadRstring (map BI.w2c chars)))
                  (RType 5)  -> do chars <- replicateM len getWord8
                                   return (RSym (depadRstring (map BI.w2c chars)))
-                 (RType 6)  -> do b <- getWord8
+                 (RType 6)  -> do b <- getWord32le -- this may be a byte in the spec but it's always padded
                                   return (RBool (b == 1))  -- 1=TRUE, 0=FALSE, 2=NA
-                 (RType 16) -> do rsexpsBytes <- replicateM len getWord8
-                                  let rsexps = vectorRSEXPDecode rsexpsBytes
-                                  return (RVector rsexps)
-                 (RType 18) -> do closBytes <- replicateM len getWord8
-                                  return (RClos len)
+                 (RType 16) -> getVector len
+                 (RType 17) -> do h <- get
+                                  vals <- get
+                                  tag <- get
+                                  return (RList h vals tag)
+                 (RType 18) -> do v <- getWord32le
+                                  return (RClos v )
                  (RType 19) -> do chars <- replicateM len getWord8
                                   return (RSym (depadRstring (map BI.w2c chars)))
-                 (RType 21) -> do listTagBytes <- replicateM len getWord8
-                                  let taglist = listTagDecode listTagBytes
-                                  return (RListTag taglist)
+                 (RType 21) -> getListTag len
+                 (RType 22) -> getVector len
+                 (RType 23) -> getListTag len
                  (RType 32) -> do ints <- replicateM (len `div` 4) getWord32le
                                   return (RArrayInt (map fromIntegral ints))
                  (RType 33) -> do doubles <- replicateM (len `div` 8) getFloat64le
@@ -239,24 +258,44 @@ getRType typeCode len =
                                   return (RArrayString strings)
                  (RType 36) -> do boolCount <-getWord32le
                                   bools <- replicateM (fromIntegral boolCount::Int) getWord8
+                                  replicateM_ (len - 4 - fromIntegral boolCount::Int) getWord8
                                   return (RArrayBool (map (==1) bools))
+                 (RType 38) -> do doubles <- replicateM (len `div` 8) getFloat64le
+                                  return (RArrayComplex (pairs doubles))
+                 (RType 48) -> do v <- getWord32le
+                                  return (RUnknown v)
+                 (RType x) ->  do br <- bytesRead
+                                  error ("unsuppported type code:" ++ show x ++ " bytes read:"++show br)
                  _  -> error ("unsuppported RSEXP type code:"++show typeCode)
-           
+
+getVector :: Int -> Get RSEXP
+getVector len = do rsexpsBytes <- replicateM len getWord8
+                   let rsexps = vectorRSEXPDecode rsexpsBytes
+                   return (RVector rsexps)
+                                                                     
+getListTag :: Int -> Get RSEXP
+getListTag len = do listTagBytes <- replicateM len getWord8
+                    let taglist = listTagDecode listTagBytes
+                    return (RListTag taglist)
+                                                                     
 vectorRSEXPDecode :: [Word8] -> [RSEXP]
 vectorRSEXPDecode [] = []
-vectorRSEXPDecode ws = val : vectorRSEXPDecode (drop (encodedLength val) ws)
+vectorRSEXPDecode ws@(t:l1:l2:l3:rws) = if encodingOK then val : vectorRSEXPDecode (drop (from24Bit (Len24 l1 l2 l3)) rws) else error ("Encoding error in val:"++(show val))
   where content = BL.pack (map BI.w2c ws)
         val = decode content
+        encodingOK = encodedLength val == from24Bit (Len24 l1 l2 l3) + 4
+vectorRSEXPDecode _ = error "vectorRSEXPDecode: trailing bytes"
 
 encodedLength :: RSEXP -> Int
-encodedLength s = fromIntegral(BL.length (encode s))::Int
+encodedLength s = if l `mod` 4 == 0 then l else error "Encoded length not a multiple of 4"
+  where l = fromIntegral(BL.length (encode s))::Int
 
 vectorStringDecode :: String -> [String]
-vectorStringDecode = filter (/="") . map (dropWhile (=='\1')). splitOn "\0" 
+vectorStringDecode = init . splitOn "\0" 
 
 pairs :: [a] -> [(a,a)]
 pairs [] = []
-pairs [x] = []
+pairs [_] = []
 pairs (x:y:xs) = (x,y) : pairs xs
 
 detuple :: [(a,a)] -> [a]
