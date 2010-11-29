@@ -1,22 +1,31 @@
 name:                rclient
-version:             0.1
+version:             0.1.0.0
 synopsis:            Haskell client for Rserve
-description:         Rserve is a TCP/IP server that allows other programs to use the facilities of R. This module is a Haskell client for Rserve.
-category:            Statistics
+description:         Rserve is a TCP/IP server front end for R. This module is a Haskell client for Rserve.
+category:            Statistics,Math,Network
 license:             BSD3
 license-file:        LICENSE
-author:              Dubhrosa
-maintainer:          tdubhrosa@gmail.com
-build-depends:       base >= 3.0, 
+author:              Dubhrosa <tdubhrosa@gmail.com>
+maintainer:          Dubhrosa <tdubhrosa@gmail.com>
+build-type:          Simple
+cabal-version:  >= 1.2
+
+library
+  exposed-modules:
+    Rclient.Rclient
+  other-modules:
+    Rclient.Internal
+  build-depends:     base >= 3.0, 
                      network >= 2.3,
                      binary >= 0.4.2,
                      bytestring,
-                     QuickCheck >= 2.4
-
-build-type:          Simple
-
-executable:          rclient
-main-is:             Main.hs
-other-modules:       Rclient
-ghc-options:         -Wall -O2
+                     QuickCheck >= 2.4,
+                     split >= 0.1,
+                     data-binary-ieee754 >= 0.4
+  if impl(ghc >= 6.10) 
+        build-depends: 
+              base >= 4 
+  if impl(ghc >= 6.8)
+        ghc-options: -fwarn-tabs
+  ghc-options:         -Wall -O2
 

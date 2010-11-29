@@ -27,6 +27,7 @@ instance Arbitrary RSEXP where
                     , liftM RUnknown arbitrary
                     ]
 
+--TODO arbitrary RSEXPs are likely to be enormous, limit nesting depth somehow
 propEncodeDecodeIdentity :: RSEXP -> Bool
 propEncodeDecodeIdentity r = (decode (encode r)) == r
 
