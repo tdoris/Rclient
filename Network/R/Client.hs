@@ -1,4 +1,17 @@
-module Network.R.Client where 
+module Network.R.Client 
+  (connect
+  , eval
+  , voidEval
+  , login
+  , shutdown
+  , openFile
+  , createFile
+  , closeFile
+  , removeFile
+  , Network.R.Client.readFile
+  , Network.R.Client.writeFile
+  , rRepl) where 
+
  -- TODO :
  -- Handle Error responses
  -- implement all commands supported by Rserve
@@ -7,17 +20,19 @@ module Network.R.Client where
  -- handle authenticated connections to Rserve
 
 import Network
-import System.IO
+import System.IO (hSetBuffering, hFlush, BufferMode(..), stdout)
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.Binary
-import Data.Char
 import Data.Bits
 import qualified Data.ByteString.Internal as BI
 import Network.R.Constants
 import Network.R.Internal 
 
-connect :: String->Int->IO RConn
+-- | Connect to Rserve server 
+connect :: String      -- ^ server name, e.g. "localhost"
+           ->Int       -- ^ port, e.g. 6311
+           ->IO RConn
 connect server port = do 
   h <- connectTo server (PortNumber (fromIntegral port))
   hSetBuffering h NoBuffering
@@ -69,7 +84,7 @@ request :: RConn -> QAP1Message -> IO QAP1Message
 request rconn msg = do
   let msgContent = encode msg
 --  putStrLn ("request:"++ show (lazyByteStringToString msgContent))
-  BL.hPut h (encode msg)
+  BL.hPut h msgContent
   header <- BL.hGet h 16
   let rheader = decode header :: QAP1Header
 --  putStrLn ("header:"++show (lazyByteStringToString header))
@@ -86,11 +101,6 @@ createMessage cmdId content = QAP1Message (QAP1Header cmdId tlen 0 0) (content)
         contentLength = case content of 
                           Nothing -> 0
                           Just x -> BL.length (encode x)
-
-toDTByteStream :: B.ByteString -> DT
-toDTByteStream s = DTBytestream ws
-  where ws = map BI.c2w $ B.unpack (B.append s (B.pack (replicate (gapLen len) '\0')))
-        len = B.length s
 
 rRepl :: IO()
 rRepl = connect "localhost" 6311 >>= rReplLoop
@@ -117,9 +127,9 @@ printContent m = do
     Just x -> print x
     Nothing -> putStrLn "Nothing"
 
-byteStringToString :: B.ByteString->String
+{--byteStringToString :: B.ByteString->String
 byteStringToString  = show . map ord . B.unpack 
  
 lazyByteStringToString :: BL.ByteString->String
 lazyByteStringToString = show . map ord . BL.unpack 
-
+--}
