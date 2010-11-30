@@ -1,4 +1,4 @@
-module Network.R.Constants where
+module Network.Rserve.Constants where
 
 import Data.Binary
 import Data.Bits

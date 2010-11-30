@@ -1,4 +1,4 @@
-module Network.R.Internal where
+module Network.Rserve.Internal where
 
 import System.IO
 import Data.Bits
@@ -6,13 +6,14 @@ import Data.Binary
 import Data.Binary.Put
 import Data.Binary.Get
 import Data.Binary.IEEE754
+import Data.Char
 import Data.List
 import Data.List.Split
 import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.ByteString.Internal as BI
 import Control.Monad
-import Network.R.Constants
+import Network.Rserve.Constants
 
 data Len24 = Len24 Word8 Word8 Word8 deriving Show
 
@@ -36,7 +37,7 @@ instance Binary QAP1Header where
            return (QAP1Header c l d r)
 
 instance Binary QAP1Message where
-  put m = do case qap1Content m of 
+  put m = case qap1Content m of 
                Just dt -> put (qap1Header m) >> put dt
                Nothing -> put (qap1Header m)
 
@@ -45,7 +46,7 @@ instance Binary QAP1Message where
            return (QAP1Message header content)
 
 
-data DT = DTInt Int | DTChar Char | DTDouble Double | DTString String | DTBytestream [Word8] | DTSexp RSEXP  
+data DT = DTInt Int | DTChar Char | DTDouble Double | DTString String | DTBytestream [Word8] | DTSexp RSEXP | DTAssign String RSEXP
   deriving (Show)
 
 instance Binary DT where
@@ -57,7 +58,9 @@ instance Binary DT where
                               paddedString = padRstring s 
   put (DTBytestream s)= putWord8 dtBytestream >> put len24 >> mapM_ putWord8 s
                           where len24 = to24bit (length s)
-  put (DTSexp s) = put s
+  put (DTSexp s) = putWord8 dtSexp >> put len24 >> put s
+                     where len24 = to24bit (fromIntegral (BL.length (encode s))::Int)
+  put (DTAssign symbol sexp) = put (DTString symbol) >> put (DTSexp sexp)
   get = do t <- getWord8 
            case fromIntegral t::Int of
               1 -> liftM DTInt get
@@ -73,7 +76,7 @@ instance Binary DT where
                       return (DTBytestream ws)
               10 -> do replicateM_ 3 getWord8
                        liftM DTSexp get
-              x -> error ("Unsupported DTSexp id:"++show x)
+              x -> error ("Unsupported DT id:"++show x)
 
 data RConn = RConn {rcHandle::Handle, rcRserveSig:: String, rcRserveVersion::String, rcProtocol::String, rcAttributes::[String]} deriving (Show)
 
@@ -85,7 +88,7 @@ data RSEXP =
   | RSym String 
   | RBool Bool 
   | RVector [RSEXP] 
-  | RList RSEXP RSEXP RSEXP -- head vals tag
+--  | RList RSEXP RSEXP RSEXP -- head vals tag -- I can't find any evidence that this is ever used in Rserve
   | RClos Word32  -- just store the length 
   | RListTag [(RSEXP,RSEXP)]
   | RArrayInt [Int]
@@ -105,9 +108,8 @@ getTypeCode (RString _)     = xtStr
 getTypeCode (RSym _)        = xtSym
 getTypeCode (RBool _)       = xtBool
 getTypeCode (RVector _)     = xtVector
-getTypeCode (RList _ _ _)       = xtList
 getTypeCode (RClos _)     = xtClos
-getTypeCode (RListTag _)    = xtList
+getTypeCode (RListTag _)    = xtListTag
 getTypeCode (RArrayInt _)   = xtArrayInt
 getTypeCode (RArrayDouble _)= xtArrayDouble
 getTypeCode (RArrayString _)= xtArrayStr
@@ -161,10 +163,12 @@ instance Binary RSEXP where
                          where len24 = to24bit (sum (map encodedLength rsexps))
                                rsexps = detuple lt
   put (RClos v) = putWord8 xtClos >> put (to24bit 4) >> putWord32le v 
-  put (RList h vals tag) = putWord8 xtList >> put len24 >> put h >> put vals >> put tag
-                     where len24 = to24bit (encodedLength h + encodedLength vals + encodedLength tag)
+--  put (RList h vals tag) = putWord8 xtList >> put len24 >> put h >> put vals >> put tag
+--                     where len24 = to24bit (encodedLength h + encodedLength vals + encodedLength tag)
   put (RVector v) = putWord8 xtVector  >> put len24 >> mapM_ put v
                        where len24 = to24bit (sum (map encodedLength v))
+-- The way Rserve serialises this isn't great, the val header is munged into the header for the entire object and the id bitwised ored with 128 
+-- which also means it's impossible to serialise an RSEXPWithAttrib which has an RSEXPWithAttrib as a value
   put (RSEXPWithAttrib attrib val) = putWord8 (fromIntegral code) >> put len24 >> put attrib >> mapM_ (putWord8 . BI.c2w) (BL.unpack (BL.drop 4 (encode val)))
                                    where code = getTypeCode val .|. xtHasAttr 
                                          len24 = to24bit (encodedLength attrib + encodedLength val - 4) 
@@ -201,10 +205,6 @@ getRType typeCode len =
                  (RType 6)  -> do b <- getWord32le -- this may be a byte in the spec but it's always padded
                                   return (RBool (b == 1))  -- 1=TRUE, 0=FALSE, 2=NA
                  (RType 16) -> getVector len
-                 (RType 17) -> do h <- get
-                                  vals <- get
-                                  tag <- get
-                                  return (RList h vals tag)
                  (RType 18) -> do v <- getWord32le
                                   return (RClos v )
                  (RType 19) -> do chars <- replicateM len getWord8
@@ -244,7 +244,8 @@ getListTag len = do listTagBytes <- replicateM len getWord8
                                                                      
 vectorRSEXPDecode :: [Word8] -> [RSEXP]
 vectorRSEXPDecode [] = []
-vectorRSEXPDecode ws@(_:l1:l2:l3:rws) = if encodingOK then val : vectorRSEXPDecode (drop (from24Bit (Len24 l1 l2 l3)) rws) else error ("Encoding error in val:"++show val)
+vectorRSEXPDecode ws@(_:l1:l2:l3:rws) = if encodingOK then val : vectorRSEXPDecode (drop (from24Bit (Len24 l1 l2 l3)) rws) 
+                                                      else error ("Encoding error in val:"++show val)
   where content = BL.pack (map BI.w2c ws)
         val = decode content
         encodingOK = encodedLength val == from24Bit (Len24 l1 l2 l3) + 4
@@ -285,10 +286,12 @@ listTagDecode ws = pairs $ vectorRSEXPDecode ws
 
 parseIdString :: B.ByteString -> (String, String, String, [String])
 parseIdString b = (sig, h, r, attributes)
-  where [sig,h,r] = map B.unpack $ [(B.take 4 b), (B.take 4 (B.drop 4 b)), (B.take 4 (B.drop 8 b))]
+  where [sig,h,r] = map B.unpack [(B.take 4 b), (B.take 4 (B.drop 4 b)), (B.take 4 (B.drop 8 b))]
         attributes  = parseAttributes (B.drop 12 b)
 
 parseAttributes :: B.ByteString -> [String]
 parseAttributes = filter (=="") . map B.unpack . B.lines 
 
+lazyByteStringToString :: BL.ByteString->String
+lazyByteStringToString = show . map ord . BL.unpack 
 
