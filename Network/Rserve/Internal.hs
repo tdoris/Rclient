@@ -180,12 +180,8 @@ instance Binary RSEXP where
            let len = from24Bit len24
            let typeCode = getCode t
            case typeCode of 
-                 (RTypeAttr x) -> do attribType <- getWord8
-                                     attribLen24 <- get
-                                     let lenAttrib = from24Bit attribLen24
-                                     let attribTypeCode = getCode attribType
-                                     attrib <- getRType attribTypeCode lenAttrib
-                                     let remainingLen = len - lenAttrib - 4
+                 (RTypeAttr x) -> do attrib <- get
+                                     let remainingLen = len - encodedLength attrib
                                      val <- getRType (RType x) remainingLen
                                      return (RSEXPWithAttrib attrib val)
                  (RType _) -> getRType typeCode len
@@ -241,7 +237,7 @@ getListTag :: Int -> Get RSEXP
 getListTag len = do listTagBytes <- replicateM len getWord8
                     let taglist = listTagDecode listTagBytes
                     return (RListTag taglist)
-                                                                     
+
 vectorRSEXPDecode :: [Word8] -> [RSEXP]
 vectorRSEXPDecode [] = []
 vectorRSEXPDecode ws@(_:l1:l2:l3:rws) = if encodingOK then val : vectorRSEXPDecode (drop (from24Bit (Len24 l1 l2 l3)) rws) 
@@ -251,8 +247,10 @@ vectorRSEXPDecode ws@(_:l1:l2:l3:rws) = if encodingOK then val : vectorRSEXPDeco
         encodingOK = encodedLength val == from24Bit (Len24 l1 l2 l3) + 4
 vectorRSEXPDecode _ = error "vectorRSEXPDecode: trailing bytes"
 
+-- the serialisation code uses this function anywhere it needs to figure out how much it has written/read by encoding the RSEXP and getting the length 
+-- obviously this could be a disaster for performance as we're encoding many times for each serialisation
 encodedLength :: RSEXP -> Int
-encodedLength s = if l `mod` 4 == 0 then l else error "Encoded length not a multiple of 4"
+encodedLength s = if l `mod` 4 == 0 then l else error ("Encoded length not a multiple of 4" ++ show s)
   where l = fromIntegral(BL.length (encode s))::Int
 
 vectorStringDecode :: String -> [String]
