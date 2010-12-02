@@ -279,8 +279,24 @@ createMessage cmdId content = QAP1Message (QAP1Header cmdId tlen 0 0) content
                           Nothing -> 0
                           Just x -> BL.length (encode x)
 
--- | Read-evaluate-print-loop for interacting with Rserve session. 
---   in ghci, load this module and run this command to test and play with Rserve
+{- | Read-evaluate-print-loop for interacting with Rserve session. 
+in ghci, load this module and run this command to test and play with Rserve
+this is useful to check the actual types returned by Rserve, e.g.
+
+$ ghci
+
+Prelude>:m Network.Rserve.Client
+
+\>Prelude Networ.Rserve.Client> rRepl
+
+\>c(1,2,3)
+
+Just (RArrayDouble [1.0,2.0,3.0])
+
+\>summary(rnorm(100))
+
+Just (RSEXPWithAttrib (RListTag [(RArrayString [\"Min.\",\"1st Qu.\",\"Median\",\"Mean\",\"3rd Qu.\",\"Max.\"],RSym \"names\"),(RArrayString [\"table\"],RSym \"class\")]) (RArrayDouble [-2.914,-0.5481,0.1618,0.1491,0.9279,3.001]))
+-}
 rRepl :: IO()
 rRepl = connect "localhost" 6311 >>= rReplLoop
     
@@ -299,7 +315,7 @@ responseOK :: QAP1Message -> Bool
 responseOK h = headerCmd (qap1Header h) .&. respOK == respOK
 
 getError :: QAP1Message -> String
-getError h = if errmatch == [] then (show h) ++ " cmd stat:"++ (show s) else snd (head errmatch)
+getError h = if errmatch == [] then show h ++ " cmd stat:"++ show s else snd (head errmatch)
   where s = cmdStat (headerCmd (qap1Header h))
         errmatch = filter (\(c,_) -> c == s) errorStats
 

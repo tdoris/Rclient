@@ -80,6 +80,7 @@ instance Binary DT where
 
 data RConn = RConn {rcHandle::Handle, rcRserveSig:: String, rcRserveVersion::String, rcProtocol::String, rcAttributes::[String]} deriving (Show)
 
+-- | Representations for the types transmitted on the Rserve protocol, refer to Rserve documentation for details
 data RSEXP = 
    RNULL
   | RInt Int 
