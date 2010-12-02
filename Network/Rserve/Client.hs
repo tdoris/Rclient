@@ -1,9 +1,11 @@
+{-# LANGUAGE FlexibleInstances,TypeSynonymInstances #-}
+
 module Network.Rserve.Client 
   (RSEXP(..)
---  , DT(..)
-  , QAP1Message(..)
---  , QAP1Header
-  , RConn
+  , RConn(..)
+  , Result
+  , RserveError
+  , ResultUnpack(..)
   , connect
   , eval
   , voidEval
@@ -16,7 +18,6 @@ module Network.Rserve.Client
   --, Network.Rserve.Client.readFile
   , Network.Rserve.Client.writeFile
   , assign
-  , unpack
   , unpackRArrayInt
   , unpackRArrayBool
   , unpackRArrayDouble
@@ -30,15 +31,13 @@ module Network.Rserve.Client
   , unpackRVector
   , unpackRListTag
   , unpackRSEXPWithAttrib
-  , unpackBytestream   
   , rRepl
-  , errorList) where 
+  ) where 
 
  -- TODO :
- -- Handle Error responses better
  -- handle authenticated connections to Rserve
  -- support LARGE 
- -- support readFile (if Rserve fixes their bug omitting DT_BYTESTREAM header)
+ -- support readFile (if Rserve fixes their bug omitting DT_BYTESTREAM header, and/or someone asks for readFile)
 
 import Network
 import System.IO (hSetBuffering, hFlush, BufferMode(NoBuffering), stdout)
@@ -50,10 +49,14 @@ import qualified Data.ByteString.Internal as BI
 import Network.Rserve.Constants
 import Network.Rserve.Internal 
 
+type RserveError = String
+
+type Result = Either RserveError (Maybe RSEXP)
+
 -- | Connect to Rserve server 
 connect :: String      -- ^ server name, e.g. "localhost"
            ->Int       -- ^ port, e.g. 6311
-           ->IO RConn
+           ->IO RConn  -- ^ the connection
 connect server port = do 
   h <- connectTo server (PortNumber (fromIntegral port))
   hSetBuffering h NoBuffering
@@ -62,113 +65,196 @@ connect server port = do
   let (sig, rserveVersion, protocol, attributes) = parseIdString (B.append idString a)
   return RConn {rcHandle=h, rcRserveSig=sig, rcRserveVersion=rserveVersion, rcProtocol=protocol, rcAttributes=attributes}
 
-eval :: RConn -> String -> IO QAP1Message
+-- | evaluate an R expression
+eval :: RConn -> String -> IO Result
 eval rconn = eval' cmdEval rconn . DTString 
 
+-- | evaluate an R expression, discarding any result
 voidEval :: RConn -> String -> IO ()
 voidEval rconn cmd = do _ <- eval' cmdVoidEval rconn (DTString cmd)
                         return ()
-login :: RConn -> String -> IO QAP1Message
-login rconn = eval' cmdLogin rconn . DTString 
 
--- TODO can optionally provide an admin password with the shutdown call
+-- | login to Rserve, not normally required, for authenticated sessions only
+login :: RConn 
+      -> String  -- ^ user name
+      -> String  -- ^ password 
+      -> IO Result
+login rconn name pwd = eval' cmdLogin rconn (DTString (name ++ "\n" ++ pwd))
+
+-- | shutdown the Rserve server
 shutdown :: RConn -> IO()
 shutdown rconn = do 
   _ <- eval' cmdShutdown rconn (DTString "")
   return ()
 
-openFile :: RConn -> String -> IO QAP1Message
+-- | open a file
+openFile :: RConn -> String -> IO Result
 openFile rconn = eval' cmdOpenFile rconn . DTString 
 
-createFile :: RConn -> String -> IO QAP1Message
-createFile rconn = eval' cmdCreateFile rconn . DTString 
-
-closeFile :: RConn -> String -> IO QAP1Message
-closeFile rconn = eval' cmdCloseFile rconn . DTString 
-
-removeFile :: RConn -> String -> IO QAP1Message
-removeFile rconn = eval' cmdRemoveFile rconn . DTString 
-
--- | read file, Rserve seems not to have ever fixed the bug whereby the response is omits the DT_BYTESTREAM header, so we have to write custom serialisation for this one function.
---readFile :: RConn -> String -> IO QAP1Message
---readFile rconn = eval' cmdReadFile rconn . DTString 
-
-writeFile :: RConn -> B.ByteString -> IO QAP1Message
+-- | write content to a file accessible to the Rserve session
+writeFile :: RConn -> B.ByteString -> IO Result
 writeFile rconn = eval' cmdWriteFile rconn . DTBytestream . map BI.c2w . B.unpack 
 
-assign :: RConn -> String -> RSEXP -> IO QAP1Message
+-- | create a file
+createFile :: RConn -> String -> IO Result
+createFile rconn = eval' cmdCreateFile rconn . DTString 
+
+-- | close a file
+closeFile :: RConn -> String -> IO Result
+closeFile rconn = eval' cmdCloseFile rconn . DTString 
+
+-- | remove a file
+removeFile :: RConn -> String -> IO Result
+removeFile rconn = eval' cmdRemoveFile rconn . DTString 
+
+-- read file, Rserve seems not to have ever fixed the bug whereby the response is omits the DT_BYTESTREAM header, so we have to write custom serialisation for this one function.
+-- nobody's expressed a need for it, so leaving it out for now
+--readFile :: RConn -> String -> IO QAP1Message
+--readFile rconn = undefined
+
+-- | assign a RSEXP value to a symbol
+assign :: RConn -> String -> RSEXP -> IO Result
 assign rconn symbol = eval' cmdSetSexp rconn . DTAssign symbol 
 
-unpack :: QAP1Message -> Maybe RSEXP
-unpack m =  qap1Content m  >>= unpackDT
+-- | The ResultUnpack instances are used to extract R data structures from the Result container
+class ResultUnpack a where
+  unpack :: Result -> Maybe a
+-- | unpack RInt
+instance ResultUnpack Int where 
+  unpack (Right (Just (RInt x))) = Just x
+  unpack _ = Nothing
 
-unpackBytestream :: QAP1Message -> Maybe [Word8]
-unpackBytestream m = qap1Content m >>= unpackDTBytestream
+-- | unpack RDouble
+instance ResultUnpack Double where
+  unpack (Right (Just (RDouble x))) = Just x
+  unpack _           = Nothing 
 
-unpackDTBytestream :: DT -> Maybe [Word8]
-unpackDTBytestream (DTBytestream ws) = Just ws
-unpackDTBytestream _ = Nothing
+-- | unpack RString, RSym
+instance ResultUnpack String where
+  unpack (Right (Just (RString x))) = Just x
+  unpack (Right (Just (RSym x)))    = Just x
+  unpack _           = Nothing
+
+-- | unpack RBool
+instance ResultUnpack Bool where
+  unpack (Right (Just (RBool x))) = Just x
+  unpack _         = Nothing
+
+-- | unpack RArrayInt
+instance ResultUnpack [Int] where
+  unpack (Right (Just (RArrayInt x))) = Just x
+  unpack _ = Nothing
+
+-- | unpack RArrayDouble
+instance ResultUnpack [Double] where
+  unpack (Right (Just (RArrayDouble x))) = Just x
+  unpack _ = Nothing
+
+-- | unpack RArrayString
+instance ResultUnpack [String] where
+  unpack (Right (Just (RArrayString x))) = Just x
+  unpack _ = Nothing
+
+-- | unpack RArrayBool
+instance ResultUnpack [Bool] where
+  unpack (Right (Just (RArrayBool x))) = Just x
+  unpack _ = Nothing
+
+-- | unpack RArrayComplex
+instance ResultUnpack [(Double, Double)] where
+  unpack (Right (Just (RArrayComplex x))) = Just x
+  unpack _ = Nothing
+
+-- | unpack RSEXPWithAttrib
+instance ResultUnpack (RSEXP, RSEXP) where
+  unpack (Right (Just (RSEXPWithAttrib a v))) = Just (a,v)
+  unpack _ = Nothing
+-- | unpack RVector
+instance ResultUnpack [RSEXP] where
+  unpack (Right (Just (RVector v))) = Just v
+  unpack _ = Nothing
+
+-- | unpack RListTag
+instance ResultUnpack [(RSEXP, RSEXP)] where
+  unpack (Right (Just (RListTag l))) = Just l
+  unpack _ = Nothing
+
 
 unpackDT :: DT -> Maybe RSEXP
 unpackDT (DTSexp x) = Just x
 unpackDT _          = Nothing
 
-unpackRArrayInt :: RSEXP -> Maybe [Int]
-unpackRArrayInt (RArrayInt is) = Just is
+-- | unpack a Result containing an RArrayInt
+unpackRArrayInt :: Result -> Maybe [Int]
+unpackRArrayInt (Right (Just (RArrayInt is))) = Just is
 unpackRArrayInt _ = Nothing
 
-unpackRArrayDouble ::RSEXP -> Maybe [Double]
-unpackRArrayDouble (RArrayDouble ds) = Just ds
+-- | unpack a Result containing an RArrayDouble
+unpackRArrayDouble :: Result -> Maybe [Double]
+unpackRArrayDouble (Right (Just (RArrayDouble ds))) = Just ds
 unpackRArrayDouble _ = Nothing
 
-unpackRArrayComplex :: RSEXP -> Maybe [(Double, Double)]
-unpackRArrayComplex (RArrayComplex cs) = Just cs
+-- | unpack a Result containing an RArrayComplex
+unpackRArrayComplex :: Result -> Maybe [(Double, Double)]
+unpackRArrayComplex (Right (Just (RArrayComplex cs))) = Just cs
 unpackRArrayComplex _ = Nothing
 
-unpackRArrayString :: RSEXP -> Maybe [String]
-unpackRArrayString (RArrayString ss) = Just ss
+-- | unpack a Result containing an RArrayString
+unpackRArrayString :: Result -> Maybe [String]
+unpackRArrayString (Right (Just (RArrayString ss))) = Just ss
 unpackRArrayString _ = Nothing
 
-unpackRArrayBool :: RSEXP -> Maybe [Bool]
-unpackRArrayBool (RArrayBool bs) = Just bs
+-- | unpack a Result containing an RArrayBool
+unpackRArrayBool :: Result -> Maybe [Bool]
+unpackRArrayBool (Right (Just (RArrayBool bs))) = Just bs
 unpackRArrayBool _ = Nothing
 
-unpackRInt :: RSEXP -> Maybe Int
-unpackRInt (RInt i) = Just i
+-- | unpack a Result containing an RInt
+unpackRInt :: Result -> Maybe Int
+unpackRInt (Right (Just (RInt i))) = Just i
 unpackRInt _        = Nothing
 
-unpackRDouble :: RSEXP -> Maybe Double
-unpackRDouble (RDouble d) = Just d
+-- | unpack a Result containing an RDouble
+unpackRDouble :: Result -> Maybe Double
+unpackRDouble (Right (Just (RDouble d))) = Just d
 unpackRDouble _ = Nothing
 
-unpackRString :: RSEXP -> Maybe String
-unpackRString (RString s) = Just s
+-- | unpack a Result containing an RString
+unpackRString :: Result -> Maybe String
+unpackRString (Right (Just (RString s))) = Just s
 unpackRString _ = Nothing
 
-unpackRSym :: RSEXP -> Maybe String
-unpackRSym (RSym s) = Just s
+-- | unpack a Result containing an RSym
+unpackRSym :: Result -> Maybe String
+unpackRSym (Right (Just (RSym s))) = Just s
 unpackRSym _ = Nothing
 
-unpackRBool :: RSEXP -> Maybe Bool
-unpackRBool (RBool b) = Just b
+-- | unpack a Result containing an RBool
+unpackRBool :: Result -> Maybe Bool
+unpackRBool (Right (Just (RBool b))) = Just b
 unpackRBool _ = Nothing
 
-unpackRVector :: RSEXP -> Maybe [RSEXP]
-unpackRVector (RVector v) = Just v
+-- | unpack a Result containing an RVector
+unpackRVector :: Result -> Maybe [RSEXP]
+unpackRVector (Right (Just (RVector v))) = Just v
 unpackRVector _ = Nothing
 
-unpackRListTag :: RSEXP -> Maybe [(RSEXP, RSEXP)]
-unpackRListTag (RListTag ls) = Just ls
+-- | unpack a Result containing an RListTag
+unpackRListTag :: Result -> Maybe [(RSEXP, RSEXP)]
+unpackRListTag (Right (Just (RListTag ls))) = Just ls
 unpackRListTag _ = Nothing
 
-unpackRSEXPWithAttrib :: RSEXP -> Maybe (RSEXP, RSEXP)
-unpackRSEXPWithAttrib (RSEXPWithAttrib attrib value)=Just (attrib, value)
+-- | unpack a Result containing an RSEXPWithAttrib
+unpackRSEXPWithAttrib :: Result -> Maybe (RSEXP, RSEXP)
+unpackRSEXPWithAttrib (Right (Just (RSEXPWithAttrib attrib value)))=Just (attrib, value)
 unpackRSEXPWithAttrib _ = Nothing
 
-eval' :: Word32 -> RConn -> DT -> IO QAP1Message
+eval' :: Word32 -> RConn -> DT -> IO Result 
 eval' rcmd rconn cmd = do
   let msg = createMessage rcmd (Just cmd)
-  request rconn msg
+  response <- request rconn msg
+  if responseOK response then return (Right (qap1Content response  >>= unpackDT))
+                         else return (Left (getError response))
 
 request :: RConn -> QAP1Message -> IO QAP1Message
 request rconn msg = do
@@ -193,6 +279,8 @@ createMessage cmdId content = QAP1Message (QAP1Header cmdId tlen 0 0) content
                           Nothing -> 0
                           Just x -> BL.length (encode x)
 
+-- | Read-evaluate-print-loop for interacting with Rserve session. 
+--   in ghci, load this module and run this command to test and play with Rserve
 rRepl :: IO()
 rRepl = connect "localhost" 6311 >>= rReplLoop
     
@@ -202,23 +290,16 @@ rReplLoop conn = do
   hFlush stdout
   cmd <- getLine
   response <- eval conn cmd
-  if responseOK response then printContent response else print (errorList response)
+  case response of 
+    Right x -> print x
+    Left x -> print ("Error:"++show x)
   rReplLoop conn
 
 responseOK :: QAP1Message -> Bool
 responseOK h = headerCmd (qap1Header h) .&. respOK == respOK
 
-errorList :: QAP1Message -> [(Word32, String)]
-errorList h = filter (\(c,_) -> c == s) errorStats
+getError :: QAP1Message -> String
+getError h = if errmatch == [] then (show h) ++ " cmd stat:"++ (show s) else snd (head errmatch)
   where s = cmdStat (headerCmd (qap1Header h))
+        errmatch = filter (\(c,_) -> c == s) errorStats
 
-printContent :: QAP1Message -> IO()
-printContent m = 
-  case qap1Content m of 
-    Just x -> print x
-    Nothing -> putStrLn "Nothing"
-
-{--byteStringToString :: B.ByteString->String
-byteStringToString  = show . map ord . B.unpack 
---}
- 

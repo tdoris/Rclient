@@ -43,7 +43,7 @@ cmdResp :: Word32
 cmdResp = 0x10000
 
 cmdStat :: Word32 -> Word32
-cmdStat x = x `shiftR` 24 .&. 127
+cmdStat x = (x `shiftR` 24) .&. 127
 
 respOK :: Word32
 respOK = cmdResp .|. 0x0001
