@@ -16,7 +16,7 @@ library
   other-modules:
     Network.Rserve.Internal
     Network.Rserve.Constants
-  build-depends:     base >= 3.0, 
+  build-depends:     base >= 3.0 && < 4,
                      network >= 2.3,
                      binary >= 0.4.2,
                      bytestring,
