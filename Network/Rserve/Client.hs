@@ -3,11 +3,11 @@
 -- | This module allows you to issue R commands from Haskell to be executed via Rserve and get the results back in Haskell data types. 
 
 module Network.Rserve.Client 
-  (RSEXP(..)
-  , RConn(..)
+  (RConn(..)
   , Result
   , RserveError
   , ResultUnpack(..)
+  , RSEXP(..)
   , connect
   , eval
   , voidEval
@@ -121,6 +121,7 @@ assign rconn symbol = eval' cmdSetSexp rconn . DTAssign symbol
 -- | The ResultUnpack instances are used to extract R data structures from the Result container. 
 class ResultUnpack a where
   unpack :: Result -> Maybe a
+
 -- | unpack RInt
 instance ResultUnpack Int where 
   unpack (Right (Just (RInt x))) = Just x
